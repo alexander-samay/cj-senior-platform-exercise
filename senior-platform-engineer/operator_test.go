@@ -199,6 +199,62 @@ func TestReconcileRefusesToDeleteUnownedPod(t *testing.T) {
 	}
 }
 
+func TestReconcileResumesDeletionAfterRestart(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	resource := testResource()
+	pod := ownedPod(resource, started)
+	resource.Status = CjPodStatus{
+		Phase:     PhaseDeleting,
+		PodUID:    pod.UID,
+		StartedAt: &metav1.Time{Time: started},
+	}
+	scheme := testScheme(t)
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource, pod).Build()
+	restartedProcess := &CjPodReconciler{
+		Client: client,
+		Scheme: scheme,
+		Clock:  &fakeClock{now: started.Add(PodLifetime + time.Minute)},
+	}
+
+	if _, err := restartedProcess.Reconcile(ctx, requestFor(resource)); err != nil {
+		t.Fatalf("deletion recovery returned error: %v", err)
+	}
+	var got corev1.Pod
+	err := client.Get(ctx, requestFor(resource).NamespacedName, &got)
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expected restarted controller to finish deletion, got %v", err)
+	}
+}
+
+func TestReconcileRefusesOwnedPodWithDifferentUID(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	resource := testResource()
+	pod := ownedPod(resource, started)
+	resource.Status = CjPodStatus{
+		Phase:     PhaseRunning,
+		PodUID:    types.UID("original-pod-uid"),
+		StartedAt: &metav1.Time{Time: started},
+	}
+	scheme := testScheme(t)
+	client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource, pod).Build()
+	reconciler := &CjPodReconciler{
+		Client: client,
+		Scheme: scheme,
+		Clock:  &fakeClock{now: started.Add(time.Hour)},
+	}
+
+	_, err := reconciler.Reconcile(ctx, requestFor(resource))
+	if err == nil || !strings.Contains(err.Error(), "UID changed") {
+		t.Fatalf("expected UID safety error, got %v", err)
+	}
+	var got corev1.Pod
+	if err := client.Get(ctx, requestFor(resource).NamespacedName, &got); err != nil {
+		t.Fatalf("replacement Pod was deleted: %v", err)
+	}
+}
+
 func TestCompletedResourceDoesNotCreateAnotherPod(t *testing.T) {
 	ctx := context.Background()
 	resource := testResource()

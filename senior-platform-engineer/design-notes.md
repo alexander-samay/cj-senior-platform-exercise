@@ -32,6 +32,6 @@ In a distributed system, "exactly three minutes" means **not before three minute
 
 ## Tests
 
-The unit tests use controller-runtime's fake client and an injected clock. They verify template rendering and ownership, the no-early-delete boundary, recovery with a fresh reconciler instance, deletion and completion, refusal to touch an unowned Pod, and one-shot behavior after completion.
+The unit tests use controller-runtime's fake client and an injected clock. They verify template rendering and ownership, the no-early-delete boundary, timer recovery with a fresh reconciler instance, recovery from a persisted deletion intent, deletion and completion, refusal to touch an unowned Pod or a different Pod UID, and one-shot behavior after completion.
 
 For production I would add envtest coverage against a real API server, leader election for multiple replicas, metrics for reconciliation failures and deletion lag, and a validating admission policy for unusable Pod templates.
