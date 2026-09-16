@@ -48,6 +48,8 @@ I would validate the result in CI with Alertmanager's configuration checker and 
 - active upgrade plus each deliberately inhibitable target;
 - active upgrade plus storage-full alert -> still pages.
 
+I also ran the proposed route tree through `amtool` while preparing this answer. `amtool check-config` accepted it, and route tests resolved a critical platform alert to `pagerduty-critical,platform-slack`, a warning platform alert to `platform-slack`, a critical non-platform alert to `pagerduty-critical`, and an unmatched warning to `default-slack`. The original tree resolved the incident's label set only to `platform-slack`.
+
 Before rollout I would also verify the PagerDuty routing key and service state with a controlled test alert, confirm Slack and PagerDuty grouping expectations, check for active silences or mute intervals outside this snippet, and inspect Alertmanager notification metrics and logs. A correct route does not prove that the downstream integration is usable.
 
 ## Why review missed it

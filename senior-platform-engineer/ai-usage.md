@@ -33,5 +33,6 @@ I used OpenAI Codex as a design and implementation assistant.
 - I read the assignment and traced every stated requirement to a section or test.
 - I checked the custom-networking mechanism and environment variables against the AWS EKS documentation.
 - I checked route traversal and the default `continue: false` behavior against the Prometheus Alertmanager documentation.
+- I validated the original and proposed Alertmanager configurations with `amtool check-config` and exercised four representative label sets with `amtool config routes test`.
 - I reviewed the controller's crash windows and ownership checks as a state machine rather than relying only on generated code.
 - I formatted the code, reviewed the resulting diff, and ran `go vet ./...`, `go test ./...`, and `go test -race ./...`. All checks passed.
