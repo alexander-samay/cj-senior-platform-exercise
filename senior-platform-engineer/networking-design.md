@@ -58,6 +58,18 @@ Connecting the VPCs alone does not install the needed routes. I would add symmet
 - Cluster 1 route tables: `10.0.2.0/24` and `100.65.0.0/16` via the peering connection.
 - Cluster 2 route tables: `10.0.1.0/24` and `100.64.0.0/16` via the peering connection.
 
+A simplified Cluster 1 route table therefore includes:
+
+| Destination | Target |
+|---|---|
+| `10.0.1.0/24` | local |
+| `100.64.0.0/16` | local |
+| `10.0.2.0/24` | VPC peer |
+| `100.65.0.0/16` | VPC peer |
+| `10.0.0.0/8` | corporate VPN |
+
+Cluster 2 has the mirror image. AWS selects the longest prefix, so Cluster 1 traffic for `10.0.2.0/24` takes the `/24` peering route instead of the broader `/8` VPN route. The explicit reverse `/24` and `/16` routes keep the return path on the peer as well. VPC association automatically supplies the local primary and secondary CIDR routes; the peer and VPN routes are the entries I add.
+
 I would then update security groups and network ACLs in both directions for the required ports. If Cluster 1 talks directly to Cluster 2 Pod IPs and source identity must be preserved, I would exempt the peer CIDRs from the VPC CNI's node SNAT using `AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS`; the reverse routes above are then mandatory. This setting must be tested alongside internet egress because broad SNAT changes can break unrelated outbound traffic.
 
 Applications should use private DNS names rather than Pod IPs. For normal service consumption, Cluster 1 resolves a private name to an internal load balancer in Cluster 2. I would associate the private hosted zone with both VPCs, or use Route 53 Resolver forwarding where corporate DNS also needs the name. Peering DNS-resolution options must be enabled if the selected name-resolution path depends on them.
