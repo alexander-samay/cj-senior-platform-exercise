@@ -1,4 +1,4 @@
-module github.com/Samay312School/cj-senior-platform-exercise
+module github.com/alexander-samay/cj-senior-platform-exercise
 
 go 1.24.0
 
