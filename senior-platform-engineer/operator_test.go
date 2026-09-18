@@ -2,6 +2,7 @@ package cjpod
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,10 +11,68 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+type failingStatusWriter struct {
+	client.SubResourceWriter
+	failures int
+	err      error
+}
+
+func (w *failingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if w.failures > 0 {
+		w.failures--
+		return w.err
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+type statusFailingClient struct {
+	client.Client
+	writer *failingStatusWriter
+}
+
+func newStatusFailingClient(delegate client.Client, failures int, err error) *statusFailingClient {
+	return &statusFailingClient{
+		Client: delegate,
+		writer: &failingStatusWriter{SubResourceWriter: delegate.Status(), failures: failures, err: err},
+	}
+}
+
+func (c *statusFailingClient) Status() client.SubResourceWriter { return c.writer }
+
+type deleteFailingClient struct {
+	client.Client
+	failures int
+	err      error
+}
+
+type podReadFailingClient struct {
+	client.Client
+	failures int
+	err      error
+}
+
+func (c *podReadFailingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if _, isPod := obj.(*corev1.Pod); isPod && c.failures > 0 {
+		c.failures--
+		return c.err
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+func (c *deleteFailingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if c.failures > 0 {
+		c.failures--
+		return c.err
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
 
 type fakeClock struct{ now time.Time }
 
@@ -270,5 +329,206 @@ func TestCompletedResourceDoesNotCreateAnotherPod(t *testing.T) {
 	err := client.Get(ctx, requestFor(resource).NamespacedName, &pod)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("completed CjPod created another Pod: %v", err)
+	}
+}
+
+func TestRecoversWhenPodCreationSucceedsButStatusUpdateFails(t *testing.T) {
+	ctx := context.Background()
+	resource := testResource()
+	started := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	clock := &fakeClock{now: started}
+	scheme := testScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource).Build()
+	injectedError := errors.New("injected status write failure")
+	failingClient := newStatusFailingClient(baseClient, 1, injectedError)
+	reconciler := &CjPodReconciler{Client: failingClient, Scheme: scheme, Clock: clock}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(resource)); !errors.Is(err, injectedError) {
+		t.Fatalf("expected injected status error, got %v", err)
+	}
+	var pod corev1.Pod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &pod); err != nil {
+		t.Fatalf("Pod creation should survive the failed status write: %v", err)
+	}
+	// The fake API server does not assign timestamps, so model the timestamp
+	// that a real API server persists before the retry.
+	pod.CreationTimestamp = metav1.NewTime(started)
+	pod.UID = types.UID("recovered-pod-uid")
+	if err := baseClient.Update(ctx, &pod); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := &CjPodReconciler{Client: baseClient, Scheme: scheme, Clock: &fakeClock{now: started.Add(time.Minute)}}
+	result, err := restarted.Reconcile(ctx, requestFor(resource))
+	if err != nil {
+		t.Fatalf("restarted reconcile failed: %v", err)
+	}
+	if result.RequeueAfter != 2*time.Minute {
+		t.Fatalf("expected recovered timer to have two minutes left, got %s", result.RequeueAfter)
+	}
+	var recovered CjPod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status.PodUID != pod.UID || recovered.Status.StartedAt == nil {
+		t.Fatalf("controller did not reconstruct status from the Pod: %#v", recovered.Status)
+	}
+}
+
+func TestRetriesDeletionAfterDeleteFailure(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	resource := testResource()
+	pod := ownedPod(resource, started)
+	scheme := testScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource, pod).Build()
+	injectedError := errors.New("injected delete failure")
+	failingClient := &deleteFailingClient{Client: baseClient, failures: 1, err: injectedError}
+	reconciler := &CjPodReconciler{Client: failingClient, Scheme: scheme, Clock: &fakeClock{now: started.Add(PodLifetime)}}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(resource)); !errors.Is(err, injectedError) {
+		t.Fatalf("expected injected delete error, got %v", err)
+	}
+	var persisted CjPod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Status.Phase != PhaseDeleting {
+		t.Fatalf("deletion intent was not persisted before delete: %#v", persisted.Status)
+	}
+	var stillPresent corev1.Pod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &stillPresent); err != nil {
+		t.Fatalf("Pod should remain after injected delete failure: %v", err)
+	}
+
+	restarted := &CjPodReconciler{Client: baseClient, Scheme: scheme, Clock: &fakeClock{now: started.Add(PodLifetime + time.Minute)}}
+	if _, err := restarted.Reconcile(ctx, requestFor(resource)); err != nil {
+		t.Fatalf("delete retry failed: %v", err)
+	}
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &stillPresent); !apierrors.IsNotFound(err) {
+		t.Fatalf("Pod was not deleted on retry: %v", err)
+	}
+}
+
+func TestRetriesCompletionAfterStatusFailure(t *testing.T) {
+	ctx := context.Background()
+	resource := testResource()
+	resource.Status.Phase = PhaseDeleting
+	scheme := testScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource).Build()
+	injectedError := apierrors.NewConflict(
+		schema.GroupResource{Group: GroupVersion.Group, Resource: "cjpods"},
+		resource.Name,
+		errors.New("injected resource-version conflict"),
+	)
+	failingClient := newStatusFailingClient(baseClient, 1, injectedError)
+	reconciler := &CjPodReconciler{Client: failingClient, Scheme: scheme, Clock: &fakeClock{now: time.Now()}}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(resource)); !apierrors.IsConflict(err) {
+		t.Fatalf("expected injected status conflict, got %v", err)
+	}
+	restarted := &CjPodReconciler{Client: baseClient, Scheme: scheme, Clock: &fakeClock{now: time.Now()}}
+	if _, err := restarted.Reconcile(ctx, requestFor(resource)); err != nil {
+		t.Fatalf("completion retry failed: %v", err)
+	}
+	var completed CjPod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &completed); err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status.Phase != PhaseCompleted || completed.Status.CompletedAt == nil {
+		t.Fatalf("completion was not persisted on retry: %#v", completed.Status)
+	}
+}
+
+func TestMissingParentIsIgnored(t *testing.T) {
+	scheme := testScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).Build()
+	reconciler := &CjPodReconciler{Client: baseClient, Scheme: scheme, Clock: &fakeClock{now: time.Now()}}
+	request := ctrl.Request{NamespacedName: types.NamespacedName{Name: "deleted-parent", Namespace: "default"}}
+	if result, err := reconciler.Reconcile(context.Background(), request); err != nil || result != (ctrl.Result{}) {
+		t.Fatalf("missing parent should be ignored, got result=%#v error=%v", result, err)
+	}
+}
+
+func TestRetriesAfterTemporaryPodReadFailure(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	resource := testResource()
+	pod := ownedPod(resource, started)
+	scheme := testScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource, pod).Build()
+	injectedError := errors.New("injected API read failure")
+	failingClient := &podReadFailingClient{Client: baseClient, failures: 1, err: injectedError}
+	reconciler := &CjPodReconciler{Client: failingClient, Scheme: scheme, Clock: &fakeClock{now: started.Add(time.Minute)}}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(resource)); !errors.Is(err, injectedError) {
+		t.Fatalf("expected injected read error, got %v", err)
+	}
+	var diagnosed CjPod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &diagnosed); err != nil {
+		t.Fatal(err)
+	}
+	failed := false
+	for _, condition := range diagnosed.Status.Conditions {
+		if condition.Type == ConditionFailed && condition.Status == metav1.ConditionTrue && condition.Reason == "PodReadFailed" {
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("temporary read failure was not exposed in status: %#v", diagnosed.Status.Conditions)
+	}
+
+	result, err := reconciler.Reconcile(ctx, requestFor(resource))
+	if err != nil {
+		t.Fatalf("reconcile did not recover after temporary read failure: %v", err)
+	}
+	if result.RequeueAfter != 2*time.Minute {
+		t.Fatalf("expected recovered reconcile to preserve deadline, got %s", result.RequeueAfter)
+	}
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &diagnosed); err != nil {
+		t.Fatal(err)
+	}
+	for _, condition := range diagnosed.Status.Conditions {
+		if condition.Type == ConditionFailed && condition.Status != metav1.ConditionFalse {
+			t.Fatalf("successful retry did not clear failure condition: %#v", condition)
+		}
+	}
+}
+
+func TestTerminatingPodRemainsDeletingUntilItDisappears(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	resource := testResource()
+	pod := ownedPod(resource, started)
+	pod.Finalizers = []string{"example.test/slow-shutdown"}
+	resource.Status = CjPodStatus{
+		Phase:     PhaseDeleting,
+		PodUID:    pod.UID,
+		StartedAt: &metav1.Time{Time: started},
+	}
+	scheme := testScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource, pod).Build()
+	reconciler := &CjPodReconciler{Client: baseClient, Scheme: scheme, Clock: &fakeClock{now: started.Add(PodLifetime + time.Minute)}}
+
+	result, err := reconciler.Reconcile(ctx, requestFor(resource))
+	if err != nil {
+		t.Fatalf("reconcile returned error for terminating Pod: %v", err)
+	}
+	if result.RequeueAfter != deletionPollDelay {
+		t.Fatalf("expected deletion polling, got %s", result.RequeueAfter)
+	}
+	var terminating corev1.Pod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &terminating); err != nil {
+		t.Fatalf("finalized Pod should still exist: %v", err)
+	}
+	if terminating.DeletionTimestamp == nil {
+		t.Fatal("expected Pod to be terminating")
+	}
+	var current CjPod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != PhaseDeleting {
+		t.Fatalf("controller completed before Pod disappeared: %#v", current.Status)
 	}
 }

@@ -6,6 +6,12 @@ The controller uses the CjPod name and namespace as the Pod key. It renders `spe
 
 The controller is level-driven rather than dependent on an in-memory timer. It stores the created Pod UID, start time, and lifecycle phase in the CjPod status. The Pod's API-server `creationTimestamp` is the authoritative timer anchor. If the process exits before the first status update, the owner reference lets the next reconcile identify the Pod and recover the timestamp and UID.
 
+The status also publishes `observedGeneration` and standard Kubernetes
+conditions. `Ready` communicates progress or completion, while `Failed`
+contains a machine-readable reason and human-readable message for the latest
+reconciliation error. Normal and warning Kubernetes Events expose important
+lifecycle transitions without requiring access to controller logs.
+
 The phases are:
 
 - `Running`: the owned Pod exists and its three-minute minimum lifetime is in progress.
@@ -15,6 +21,12 @@ The phases are:
 Persisting `Deleting` before the delete call closes an important crash window. If the process stops after deleting the Pod but before recording completion, the restarted controller sees `Deleting` plus a missing Pod and marks the resource complete. It does not accidentally create a new Pod.
 
 If an external actor deletes the Pod while the resource is still `Running`, the controller creates a replacement and starts a new three-minute lifetime for that new Pod. Once the controller begins deletion, it uses a UID precondition so a different same-name Pod cannot be deleted after a race.
+
+`Completed` is intentionally terminal. A CjPod represents one bounded Pod run,
+not a continuously converging Deployment. The CRD uses CEL to make `spec`
+immutable, so changing the template after creation is rejected with an admission
+error instead of being silently ignored. A caller creates a new CjPod with a new
+name for another run.
 
 ## Timing
 
@@ -32,6 +44,36 @@ In a distributed system, "exactly three minutes" means **not before three minute
 
 ## Tests
 
-The unit tests use controller-runtime's fake client and an injected clock. They verify template rendering and ownership, the no-early-delete boundary, timer recovery with a fresh reconciler instance, recovery from a persisted deletion intent, deletion and completion, refusal to touch an unowned Pod or a different Pod UID, and one-shot behavior after completion.
+The unit tests use controller-runtime's fake client, an injected clock, and
+fault-injecting client wrappers. They verify template rendering and ownership,
+the no-early-delete boundary, timer recovery with a fresh reconciler instance,
+recovery from a persisted deletion intent, deletion and completion, refusal to
+touch an unowned Pod or a different Pod UID, and one-shot behavior after
+completion. Failure-path cases prove recovery when Pod creation succeeds but
+the first status write fails, deletion fails after intent is persisted, and the
+final completion status write fails.
 
-For production I would add envtest coverage against a real API server, leader election for multiple replicas, metrics for reconciliation failures and deletion lag, and a validating admission policy for unusable Pod templates.
+The integration-tagged envtest starts a real Kubernetes API server, installs
+the CRD, and starts the controller manager. It verifies admission rejects an
+empty Pod template and exercises create, watch delivery, a full manager restart,
+deadline recovery, deletion, and completed status. `make test-integration`
+installs the matching envtest binaries and runs this test.
+
+The CRD schema requires a Pod spec with at least one named container and a
+non-empty image, and status phases are constrained to the controller's three
+known values. The remainder of PodSpec is preserved because reproducing the
+upstream Kubernetes Pod schema manually would drift; the real API server still
+performs native Pod validation when the controller creates the Pod.
+
+## Runtime packaging
+
+Although the exercise only requires reconciler code, the repository also
+includes a runnable manager with signal handling, metrics, health probes and
+optional leader election. A non-root distroless image, ServiceAccount, RBAC,
+two-replica leader-elected Deployment, Kustomize configuration, sample resource,
+and installation instructions are included. See `INSTALL.md`.
+
+For a larger production system I would generate the CRD from Go markers instead
+of maintaining it by hand, publish domain-specific metrics for reconciliation
+failures and deletion lag, and add an end-to-end test on the oldest and newest
+supported Kubernetes versions.

@@ -1,0 +1,14 @@
+apiVersion: interview.cj.dev/v1
+kind: CjPod
+metadata:
+  name: cjpod-sample
+spec:
+  template:
+    metadata:
+      labels:
+        app: cjpod-sample
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: web
+          image: nginx:1.27-alpine
