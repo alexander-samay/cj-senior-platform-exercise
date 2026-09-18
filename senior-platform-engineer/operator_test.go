@@ -112,8 +112,8 @@ func testResource() *CjPod {
 			Namespace: "default",
 			UID:       types.UID("cjpod-uid"),
 		},
-		Spec: CjPodSpec{Template: corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "demo"}},
+		Spec: CjPodSpec{Template: CjPodTemplate{
+			Metadata: metav1.ObjectMeta{Labels: map[string]string{"app": "demo"}},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{
 				Name:  "abc",
 				Image: "nginx",

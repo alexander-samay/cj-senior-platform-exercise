@@ -44,3 +44,4 @@ I used OpenAI Codex as a design and implementation assistant.
 - I formatted the code, reviewed the resulting diff, and ran `go vet ./...`, `go test ./...`, and `go test -race ./...`. All checks passed.
 - I built the runnable manager and ran the integration-tagged lifecycle test against envtest, including CRD admission and a complete manager restart.
 - I rendered the Kustomize manifests, built and started the non-root container image, and repeated the shuffled unit suite 100 times.
+- I installed the generated CRD, RBAC, and two-replica Deployment in a clean Minikube cluster; verified leader election and failover, the live three-minute boundary, Conditions and Events, immutable admission, and owner-reference garbage collection; then removed the temporary cluster.

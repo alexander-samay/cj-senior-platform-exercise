@@ -66,7 +66,9 @@ upstream `PodTemplateSpec` OpenAPI schema is present rather than a permissive
 unknown-fields escape hatch. Additional CEL validation requires non-empty
 container names and images, makes the one-shot spec immutable, and constrains
 status phases to the controller's three known values. `make generate-crd`
-reproduces the checked-in manifest.
+reproduces the checked-in manifest. Unknown-field preservation is limited to
+the nested Kubernetes metadata object so labels and annotations remain usable;
+the Pod spec itself retains its generated structural schema.
 
 ## Runtime packaging
 

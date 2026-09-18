@@ -36,7 +36,15 @@ type CjPodPhase string
 
 // CjPodSpec defines the desired Pod template.
 type CjPodSpec struct {
-	Template corev1.PodTemplateSpec `json:"template"`
+	Template CjPodTemplate `json:"template"`
+}
+
+// CjPodTemplate keeps Kubernetes metadata extensible while retaining the full,
+// generated OpenAPI schema for PodSpec.
+type CjPodTemplate struct {
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Metadata metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec     corev1.PodSpec    `json:"spec"`
 }
 
 // CjPodStatus persists the lifecycle across controller restarts.
@@ -82,7 +90,8 @@ func (in *CjPod) DeepCopyObject() runtime.Object {
 	out := new(CjPod)
 	*out = *in
 	out.ObjectMeta = *in.ObjectMeta.DeepCopy()
-	out.Spec.Template = *in.Spec.Template.DeepCopy()
+	out.Spec.Template.Metadata = *in.Spec.Template.Metadata.DeepCopy()
+	out.Spec.Template.Spec = *in.Spec.Template.Spec.DeepCopy()
 	if in.Status.StartedAt != nil {
 		startedAt := in.Status.StartedAt.DeepCopy()
 		out.Status.StartedAt = startedAt
@@ -260,7 +269,7 @@ func (r *CjPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 func (r *CjPodReconciler) createPod(ctx context.Context, resource *CjPod) (ctrl.Result, error) {
 	now := metav1.NewTime(r.now())
 	pod := corev1.Pod{
-		ObjectMeta: *resource.Spec.Template.ObjectMeta.DeepCopy(),
+		ObjectMeta: *resource.Spec.Template.Metadata.DeepCopy(),
 		Spec:       *resource.Spec.Template.Spec.DeepCopy(),
 	}
 	pod.Name = resource.Name

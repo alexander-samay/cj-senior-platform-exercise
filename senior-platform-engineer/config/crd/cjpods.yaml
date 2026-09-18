@@ -39,18 +39,15 @@ spec:
             description: CjPodSpec defines the desired Pod template.
             properties:
               template:
-                description: PodTemplateSpec describes the data a pod should have
-                  when created from a template
+                description: |-
+                  CjPodTemplate keeps Kubernetes metadata extensible while retaining the full,
+                  generated OpenAPI schema for PodSpec.
                 properties:
                   metadata:
-                    description: |-
-                      Standard object's metadata.
-                      More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
                     type: object
+                    x-kubernetes-preserve-unknown-fields: true
                   spec:
-                    description: |-
-                      Specification of the desired behavior of the pod.
-                      More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
+                    description: PodSpec is a description of a pod.
                     properties:
                       activeDeadlineSeconds:
                         description: |-
@@ -8451,6 +8448,8 @@ spec:
                     required:
                     - containers
                     type: object
+                required:
+                - spec
                 type: object
             required:
             - template
