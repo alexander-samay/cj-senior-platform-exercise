@@ -41,7 +41,7 @@ spec:
         - name: manager
           # Local-development placeholder. INSTALL.md requires a registry digest
           # override before installing this manifest in a production cluster.
-          image: cjpod-controller:latest
+          image: cjpod-controller:v0.1.0
           imagePullPolicy: IfNotPresent
           args: [--leader-elect]
           securityContext:

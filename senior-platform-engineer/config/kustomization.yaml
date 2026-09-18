@@ -9,4 +9,4 @@ resources:
 images:
   - name: cjpod-controller
     newName: cjpod-controller
-    newTag: latest
+    newTag: v0.1.0
