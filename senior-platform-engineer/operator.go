@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -20,18 +21,20 @@ import (
 )
 
 const (
-	PodLifetime                  = 3 * time.Minute
-	PhaseRunning      CjPodPhase = "Running"
-	PhaseDeleting     CjPodPhase = "Deleting"
-	PhaseCompleted    CjPodPhase = "Completed"
-	ConditionReady               = "Ready"
-	ConditionFailed              = "Failed"
-	deletionPollDelay            = time.Second
+	PodLifetime                   = 3 * time.Minute
+	PhaseRunning       CjPodPhase = "Running"
+	PhaseDeleting      CjPodPhase = "Deleting"
+	PhaseCompleted     CjPodPhase = "Completed"
+	PhaseFailed        CjPodPhase = "Failed"
+	ConditionReady                = "Ready"
+	ConditionCompleted            = "Completed"
+	ConditionFailed               = "Failed"
+	deletionPollDelay             = time.Second
 )
 
 var GroupVersion = schema.GroupVersion{Group: "interview.cj.dev", Version: "v1"}
 
-// +kubebuilder:validation:Enum=Running;Deleting;Completed
+// +kubebuilder:validation:Enum=Running;Deleting;Completed;Failed
 type CjPodPhase string
 
 // CjPodSpec defines the desired Pod template.
@@ -39,12 +42,16 @@ type CjPodSpec struct {
 	Template CjPodTemplate `json:"template"`
 }
 
-// CjPodTemplate keeps Kubernetes metadata extensible while retaining the full,
+// CjPodTemplate exposes only safe metadata fields and retains the full,
 // generated OpenAPI schema for PodSpec.
 type CjPodTemplate struct {
-	// +kubebuilder:pruning:PreserveUnknownFields
-	Metadata metav1.ObjectMeta `json:"metadata,omitempty"`
-	Spec     corev1.PodSpec    `json:"spec"`
+	Metadata CjPodTemplateMetadata `json:"metadata,omitempty"`
+	Spec     corev1.PodSpec        `json:"spec"`
+}
+
+type CjPodTemplateMetadata struct {
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 // CjPodStatus persists the lifecycle across controller restarts.
@@ -90,7 +97,8 @@ func (in *CjPod) DeepCopyObject() runtime.Object {
 	out := new(CjPod)
 	*out = *in
 	out.ObjectMeta = *in.ObjectMeta.DeepCopy()
-	out.Spec.Template.Metadata = *in.Spec.Template.Metadata.DeepCopy()
+	out.Spec.Template.Metadata.Labels = maps.Clone(in.Spec.Template.Metadata.Labels)
+	out.Spec.Template.Metadata.Annotations = maps.Clone(in.Spec.Template.Metadata.Annotations)
 	out.Spec.Template.Spec = *in.Spec.Template.Spec.DeepCopy()
 	if in.Status.StartedAt != nil {
 		startedAt := in.Status.StartedAt.DeepCopy()
@@ -173,6 +181,7 @@ func (r *CjPodReconciler) setCondition(resource *CjPod, conditionType string, st
 
 func (r *CjPodReconciler) reportFailure(ctx context.Context, resource *CjPod, reason string, reconcileErr error) (ctrl.Result, error) {
 	r.setCondition(resource, ConditionReady, metav1.ConditionFalse, reason, reconcileErr.Error())
+	r.setCondition(resource, ConditionCompleted, metav1.ConditionFalse, "LifecycleIncomplete", "The managed Pod lifecycle has not completed")
 	r.setCondition(resource, ConditionFailed, metav1.ConditionTrue, reason, reconcileErr.Error())
 	r.event(resource, corev1.EventTypeWarning, reason, reconcileErr.Error())
 	// Preserve the reconciliation error even if the best-effort diagnostic
@@ -191,8 +200,18 @@ func (r *CjPodReconciler) clearFailure(ctx context.Context, resource *CjPod) err
 	case PhaseDeleting:
 		r.setCondition(resource, ConditionReady, metav1.ConditionFalse, "DeletionInProgress", "Pod deletion is in progress")
 	default:
-		r.setCondition(resource, ConditionReady, metav1.ConditionFalse, "PodRunning", "Pod is running until its minimum lifetime elapses")
+		r.setCondition(resource, ConditionReady, metav1.ConditionTrue, "PodRunning", "The managed Pod is running")
 	}
+	r.setCondition(resource, ConditionCompleted, metav1.ConditionFalse, "LifecycleIncomplete", "The managed Pod lifecycle has not completed")
+	return r.Status().Update(ctx, resource)
+}
+
+func (r *CjPodReconciler) markFailed(ctx context.Context, resource *CjPod, reason, message string) error {
+	resource.Status.Phase = PhaseFailed
+	r.setCondition(resource, ConditionReady, metav1.ConditionFalse, reason, message)
+	r.setCondition(resource, ConditionCompleted, metav1.ConditionFalse, "LifecycleIncomplete", "The managed Pod lifecycle did not complete")
+	r.setCondition(resource, ConditionFailed, metav1.ConditionTrue, reason, message)
+	r.event(resource, corev1.EventTypeWarning, reason, message)
 	return r.Status().Update(ctx, resource)
 }
 
@@ -202,7 +221,7 @@ func (r *CjPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	if resource.Status.Phase == PhaseCompleted {
+	if resource.Status.Phase == PhaseCompleted || resource.Status.Phase == PhaseFailed {
 		return ctrl.Result{}, nil
 	}
 
@@ -211,6 +230,9 @@ func (r *CjPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	if apierrors.IsNotFound(err) {
 		if resource.Status.Phase == PhaseDeleting {
 			return ctrl.Result{}, r.markCompleted(ctx, &resource)
+		}
+		if resource.Status.Phase == PhaseRunning && resource.Status.PodUID != "" {
+			return ctrl.Result{}, r.markFailed(ctx, &resource, "PodDeletedExternally", "The managed Pod disappeared before the controller began deletion")
 		}
 		return r.createPod(ctx, &resource)
 	}
@@ -244,7 +266,8 @@ func (r *CjPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		resource.Status.Phase = PhaseRunning
 		resource.Status.PodUID = pod.UID
 		resource.Status.StartedAt = &metav1.Time{Time: startedAt}
-		r.setCondition(&resource, ConditionReady, metav1.ConditionFalse, "PodRunning", "Pod is running until its minimum lifetime elapses")
+		r.setCondition(&resource, ConditionReady, metav1.ConditionTrue, "PodRunning", "The managed Pod is running")
+		r.setCondition(&resource, ConditionCompleted, metav1.ConditionFalse, "LifecycleIncomplete", "The managed Pod lifecycle has not completed")
 		r.setCondition(&resource, ConditionFailed, metav1.ConditionFalse, "ReconcileSucceeded", "No reconciliation error is active")
 		if err := r.Status().Update(ctx, &resource); err != nil {
 			return ctrl.Result{}, err
@@ -260,6 +283,7 @@ func (r *CjPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	// the next reconcile resumes deletion instead of creating a replacement.
 	resource.Status.Phase = PhaseDeleting
 	r.setCondition(&resource, ConditionReady, metav1.ConditionFalse, "DeletionInProgress", "Pod reached its deadline and deletion is in progress")
+	r.setCondition(&resource, ConditionCompleted, metav1.ConditionFalse, "LifecycleIncomplete", "The managed Pod lifecycle has not completed")
 	if err := r.Status().Update(ctx, &resource); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -269,8 +293,11 @@ func (r *CjPodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 func (r *CjPodReconciler) createPod(ctx context.Context, resource *CjPod) (ctrl.Result, error) {
 	now := metav1.NewTime(r.now())
 	pod := corev1.Pod{
-		ObjectMeta: *resource.Spec.Template.Metadata.DeepCopy(),
-		Spec:       *resource.Spec.Template.Spec.DeepCopy(),
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      maps.Clone(resource.Spec.Template.Metadata.Labels),
+			Annotations: maps.Clone(resource.Spec.Template.Metadata.Annotations),
+		},
+		Spec: *resource.Spec.Template.Spec.DeepCopy(),
 	}
 	pod.Name = resource.Name
 	pod.Namespace = resource.Namespace
@@ -278,6 +305,14 @@ func (r *CjPodReconciler) createPod(ctx context.Context, resource *CjPod) (ctrl.
 
 	if err := controllerutil.SetControllerReference(resource, &pod, r.Scheme); err != nil {
 		return ctrl.Result{}, err
+	}
+	// CjPod has no finalizer, so blocking owner deletion would only require
+	// unnecessary cjpods/finalizers RBAC without providing a lifecycle benefit.
+	for i := range pod.OwnerReferences {
+		if pod.OwnerReferences[i].UID == resource.UID && pod.OwnerReferences[i].Controller != nil && *pod.OwnerReferences[i].Controller {
+			blockOwnerDeletion := false
+			pod.OwnerReferences[i].BlockOwnerDeletion = &blockOwnerDeletion
+		}
 	}
 	if err := r.Create(ctx, &pod); err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -291,7 +326,8 @@ func (r *CjPodReconciler) createPod(ctx context.Context, resource *CjPod) (ctrl.
 	resource.Status.PodUID = pod.UID
 	resource.Status.StartedAt = &now
 	resource.Status.CompletedAt = nil
-	r.setCondition(resource, ConditionReady, metav1.ConditionFalse, "PodRunning", "Pod is running until its minimum lifetime elapses")
+	r.setCondition(resource, ConditionReady, metav1.ConditionTrue, "PodRunning", "The managed Pod is running")
+	r.setCondition(resource, ConditionCompleted, metav1.ConditionFalse, "LifecycleIncomplete", "The managed Pod lifecycle has not completed")
 	r.setCondition(resource, ConditionFailed, metav1.ConditionFalse, "ReconcileSucceeded", "No reconciliation error is active")
 	if err := r.Status().Update(ctx, resource); err != nil {
 		// The Pod owner reference lets a later reconcile recover its timestamp
@@ -315,7 +351,8 @@ func (r *CjPodReconciler) markCompleted(ctx context.Context, resource *CjPod) er
 	now := metav1.NewTime(r.now())
 	resource.Status.Phase = PhaseCompleted
 	resource.Status.CompletedAt = &now
-	r.setCondition(resource, ConditionReady, metav1.ConditionTrue, "Completed", "Managed Pod was deleted after its minimum lifetime")
+	r.setCondition(resource, ConditionReady, metav1.ConditionFalse, "LifecycleCompleted", "The managed Pod no longer needs to be running")
+	r.setCondition(resource, ConditionCompleted, metav1.ConditionTrue, "Completed", "Managed Pod was deleted after its minimum lifetime")
 	r.setCondition(resource, ConditionFailed, metav1.ConditionFalse, "ReconcileSucceeded", "No reconciliation error is active")
 	r.event(resource, corev1.EventTypeNormal, "Completed", "Managed Pod deletion completed")
 	return r.Status().Update(ctx, resource)

@@ -15,18 +15,12 @@ rules:
   - apiGroups: [interview.cj.dev]
     resources: [cjpods/status]
     verbs: [get, patch, update]
-  - apiGroups: [interview.cj.dev]
-    resources: [cjpods/finalizers]
-    verbs: [update]
   - apiGroups: [""]
     resources: [pods]
     verbs: [create, delete, get, list, watch]
   - apiGroups: [""]
     resources: [events]
     verbs: [create, patch, update]
-  - apiGroups: [coordination.k8s.io]
-    resources: [leases]
-    verbs: [create, delete, get, list, patch, update, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -36,6 +30,30 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: cjpod-controller
+subjects:
+  - kind: ServiceAccount
+    name: cjpod-controller
+    namespace: cjpod-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cjpod-leader-election
+  namespace: cjpod-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [create, get, list, patch, update, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cjpod-leader-election
+  namespace: cjpod-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cjpod-leader-election
 subjects:
   - kind: ServiceAccount
     name: cjpod-controller

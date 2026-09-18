@@ -23,6 +23,11 @@ I used OpenAI Codex as a design and implementation assistant.
 - Add fault-injection tests and an envtest lifecycle test instead of relying only on happy-path fake-client coverage.
 - Add a runnable manager, leader-elected deployment, RBAC, health probes, container image, sample resource, and installation instructions.
 - Publish conditions, observed generation, and Kubernetes Events, and tighten CRD admission for required container fields and lifecycle phase values.
+- Restrict template metadata to labels and annotations, report external child
+  deletion as a terminal lifecycle failure, and separate `Ready`, `Completed`,
+  and `Failed` condition semantics.
+- Pin build-stage images by digest and add cross-node anti-affinity, topology
+  spreading, a PodDisruptionBudget, a default NetworkPolicy, and seccomp.
 
 ## Suggestions rejected or changed
 
@@ -45,3 +50,9 @@ I used OpenAI Codex as a design and implementation assistant.
 - I built the runnable manager and ran the integration-tagged lifecycle test against envtest, including CRD admission and a complete manager restart.
 - I rendered the Kustomize manifests, built and started the non-root container image, and repeated the shuffled unit suite 100 times.
 - I installed the generated CRD, RBAC, and two-replica Deployment in a clean Minikube cluster; verified leader election and failover, the live three-minute boundary, Conditions and Events, immutable admission, and owner-reference garbage collection; then removed the temporary cluster.
+- After the final hardening pass, I repeated installation on a clean two-node
+  Minikube cluster. I verified the replicas landed on different nodes, the PDB,
+  NetworkPolicy, seccomp profile and narrowed RBAC were active, unsafe template
+  metadata was rejected, external Pod deletion did not create a replacement,
+  the lifecycle completed at the 180-second boundary, and leader failover
+  succeeded.

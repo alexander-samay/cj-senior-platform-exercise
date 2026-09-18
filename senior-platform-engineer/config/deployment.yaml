@@ -21,8 +21,26 @@ spec:
       serviceAccountName: cjpod-controller
       securityContext:
         runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: cjpod-controller
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: cjpod-controller
       containers:
         - name: manager
+          # Local-development placeholder. INSTALL.md requires a registry digest
+          # override before installing this manifest in a production cluster.
           image: cjpod-controller:latest
           imagePullPolicy: IfNotPresent
           args: [--leader-elect]

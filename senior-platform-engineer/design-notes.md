@@ -7,20 +7,27 @@ The controller uses the CjPod name and namespace as the Pod key. It renders `spe
 The controller is level-driven rather than dependent on an in-memory timer. It stores the created Pod UID, start time, and lifecycle phase in the CjPod status. The Pod's API-server `creationTimestamp` is the authoritative timer anchor. If the process exits before the first status update, the owner reference lets the next reconcile identify the Pod and recover the timestamp and UID.
 
 The status also publishes `observedGeneration` and standard Kubernetes
-conditions. `Ready` communicates progress or completion, while `Failed`
-contains a machine-readable reason and human-readable message for the latest
-reconciliation error. Normal and warning Kubernetes Events expose important
-lifecycle transitions without requiring access to controller logs.
+conditions. `Ready=True` means the child Pod is present and successfully
+managed, `Completed=True` means the bounded lifecycle finished, and
+`Failed=True` contains a machine-readable reason and human-readable message for
+a reconciliation or lifecycle failure. Normal and warning Kubernetes Events
+expose important transitions without requiring access to controller logs.
 
 The phases are:
 
 - `Running`: the owned Pod exists and its three-minute minimum lifetime is in progress.
 - `Deleting`: the minimum lifetime elapsed and deletion intent was persisted.
 - `Completed`: the Pod is gone and the controller must not create another one.
+- `Failed`: the lifecycle cannot safely continue and the controller must not create another Pod.
 
 Persisting `Deleting` before the delete call closes an important crash window. If the process stops after deleting the Pod but before recording completion, the restarted controller sees `Deleting` plus a missing Pod and marks the resource complete. It does not accidentally create a new Pod.
 
-If an external actor deletes the Pod while the resource is still `Running`, the controller creates a replacement and starts a new three-minute lifetime for that new Pod. Once the controller begins deletion, it uses a UID precondition so a different same-name Pod cannot be deleted after a race.
+If an external actor deletes the Pod while the resource is still `Running`, the
+controller records terminal `Failed` status instead of creating replacements
+indefinitely. It cannot retroactively guarantee three minutes for a Pod another
+actor removed, but it reports that violation explicitly and preserves bounded
+one-shot semantics. Once the controller begins deletion, it uses a UID
+precondition so a different same-name Pod cannot be deleted after a race.
 
 `Completed` is intentionally terminal. A CjPod represents one bounded Pod run,
 not a continuously converging Deployment. The CRD uses CEL to make `spec`
@@ -40,6 +47,9 @@ In a distributed system, "exactly three minutes" means **not before three minute
 - A missing CjPod is ignored. Kubernetes garbage collection handles an owned Pod if the CjPod itself is deleted.
 - An unowned same-name Pod is a collision, not something the controller may delete or overwrite.
 - A stored Pod UID mismatch is treated as a safety error.
+- Only labels and annotations are copied from template metadata. User-supplied
+  names, namespaces, owner references, finalizers, deletion fields, managed
+  fields, and resource versions cannot enter the child Pod.
 - Status is a CRD subresource so lifecycle writes do not overwrite a concurrent spec change.
 
 ## Tests
@@ -59,24 +69,37 @@ The integration-tagged envtest starts a real Kubernetes API server, installs
 the CRD, and starts the controller manager. It verifies admission rejects an
 empty Pod template and exercises create, watch delivery, a full manager restart,
 deadline recovery, deletion, and completed status. `make test-integration`
-installs the matching envtest binaries and runs this test.
+installs the matching envtest binaries and runs this test. A second lifecycle
+case deletes the child externally and verifies terminal `Failed` status with no
+replacement Pod.
 
 The CRD is generated from the Go types with `controller-gen`, so the complete
-upstream `PodTemplateSpec` OpenAPI schema is present rather than a permissive
+upstream `PodSpec` OpenAPI schema is present rather than a permissive
 unknown-fields escape hatch. Additional CEL validation requires non-empty
 container names and images, makes the one-shot spec immutable, and constrains
-status phases to the controller's three known values. `make generate-crd`
-reproduces the checked-in manifest. Unknown-field preservation is limited to
-the nested Kubernetes metadata object so labels and annotations remain usable;
-the Pod spec itself retains its generated structural schema.
+status phases to the controller's four known values. `make generate-crd`
+reproduces the checked-in manifest. Template metadata has its own narrow schema
+that accepts only labels and annotations. Other `ObjectMeta` fields are rejected
+when strict field validation is used, or pruned by the API server otherwise;
+either way, they cannot be copied to the child. The Pod spec retains its
+generated structural schema. This makes the CRD large and couples it to the
+pinned Kubernetes API dependency; regeneration and compatibility review are
+therefore required when that dependency changes.
+
+There is only one served and stored version today, so no conversion is needed.
+Before adding a future version, I would introduce a hub-and-spoke conversion
+strategy (and a conversion webhook for non-trivial changes), test round trips,
+and migrate stored objects before removing an old served version.
 
 ## Runtime packaging
 
 Although the exercise only requires reconciler code, the repository also
 includes a runnable manager with signal handling, metrics, health probes and
 optional leader election. A non-root distroless image, ServiceAccount, RBAC,
-two-replica leader-elected Deployment, Kustomize configuration, sample resource,
-and installation instructions are included. See `INSTALL.md`.
+two-replica leader-elected Deployment, required cross-node anti-affinity,
+topology spreading, a PodDisruptionBudget, a NetworkPolicy, Kustomize
+configuration, sample resource, and installation instructions are included.
+See `INSTALL.md`.
 
 For a larger production system I would publish domain-specific metrics for
 reconciliation failures and deletion lag, and add an end-to-end test on the

@@ -40,12 +40,20 @@ spec:
             properties:
               template:
                 description: |-
-                  CjPodTemplate keeps Kubernetes metadata extensible while retaining the full,
+                  CjPodTemplate exposes only safe metadata fields and retains the full,
                   generated OpenAPI schema for PodSpec.
                 properties:
                   metadata:
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
                     type: object
-                    x-kubernetes-preserve-unknown-fields: true
                   spec:
                     description: PodSpec is a description of a pod.
                     properties:
@@ -8524,6 +8532,7 @@ spec:
                 - Running
                 - Deleting
                 - Completed
+                - Failed
                 type: string
               podUID:
                 description: |-

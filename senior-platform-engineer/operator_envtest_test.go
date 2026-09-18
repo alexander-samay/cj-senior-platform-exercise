@@ -87,7 +87,16 @@ func TestManagerLifecycleWithAPIServer(t *testing.T) {
 	key := types.NamespacedName{Name: resource.Name, Namespace: resource.Namespace}
 	eventually(t, 10*time.Second, func() bool {
 		var pod corev1.Pod
-		return apiClient.Get(ctx, key, &pod) == nil && metav1.IsControlledBy(&pod, resource)
+		if apiClient.Get(ctx, key, &pod) != nil || !metav1.IsControlledBy(&pod, resource) {
+			return false
+		}
+		var current CjPod
+		if apiClient.Get(ctx, key, &current) != nil {
+			return false
+		}
+		ready := findCondition(current.Status.Conditions, ConditionReady)
+		completed := findCondition(current.Status.Conditions, ConditionCompleted)
+		return ready != nil && ready.Status == metav1.ConditionTrue && completed != nil && completed.Status == metav1.ConditionFalse
 	}, "controller did not create the owned Pod")
 
 	// Stop the whole manager, not just a reconciler call, then start a fresh
@@ -118,7 +127,8 @@ func TestManagerLifecycleWithAPIServer(t *testing.T) {
 		}
 		var pod corev1.Pod
 		podMissing := apierrors.IsNotFound(apiClient.Get(ctx, key, &pod))
-		return podMissing && current.Status.Phase == PhaseCompleted && current.Status.CompletedAt != nil
+		completed := findCondition(current.Status.Conditions, ConditionCompleted)
+		return podMissing && current.Status.Phase == PhaseCompleted && current.Status.CompletedAt != nil && completed != nil && completed.Status == metav1.ConditionTrue
 	}, "controller did not delete the Pod and persist Completed status")
 
 	var completed CjPod
@@ -128,6 +138,37 @@ func TestManagerLifecycleWithAPIServer(t *testing.T) {
 	completed.Spec.Template.Spec.Containers[0].Image = "nginx:changed"
 	if err := apiClient.Update(ctx, &completed); !apierrors.IsInvalid(err) {
 		t.Fatalf("CRD should reject changes to the one-shot spec, got %v", err)
+	}
+
+	externallyDeleted := testResource()
+	externallyDeleted.Name = "externally-deleted"
+	externallyDeleted.Namespace = namespace.Name
+	externallyDeleted.UID = ""
+	if err := apiClient.Create(ctx, externallyDeleted); err != nil {
+		t.Fatal(err)
+	}
+	externalKey := types.NamespacedName{Name: externallyDeleted.Name, Namespace: externallyDeleted.Namespace}
+	eventually(t, 10*time.Second, func() bool {
+		var pod corev1.Pod
+		return apiClient.Get(ctx, externalKey, &pod) == nil
+	}, "controller did not create the external-deletion test Pod")
+	var externalPod corev1.Pod
+	if err := apiClient.Get(ctx, externalKey, &externalPod); err != nil {
+		t.Fatal(err)
+	}
+	if err := apiClient.Delete(ctx, &externalPod); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 10*time.Second, func() bool {
+		var current CjPod
+		if apiClient.Get(ctx, externalKey, &current) != nil {
+			return false
+		}
+		return current.Status.Phase == PhaseFailed
+	}, "external Pod deletion did not produce terminal Failed status")
+	var replacement corev1.Pod
+	if err := apiClient.Get(ctx, externalKey, &replacement); !apierrors.IsNotFound(err) {
+		t.Fatalf("controller replaced an externally deleted Pod: %v", err)
 	}
 
 	select {

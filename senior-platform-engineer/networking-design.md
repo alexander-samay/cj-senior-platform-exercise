@@ -47,6 +47,12 @@ For each VPC I would:
 5. Roll the node groups after the CNI and `ENIConfig` resources exist. Existing nodes do not acquire custom networking automatically. I would cordon and drain them only after replacement capacity is ready.
 6. Set kubelet `maxPods` to a value supported by the instance type and prefix-delegation configuration. Prefix delegation gives the CNI `/28` prefixes on secondary ENIs, which increases Pod density and reduces individual EC2 API allocation calls. Subnet CIDR reservations can protect contiguous `/28` blocks from fragmentation.
 
+IPv4 prefix delegation requires Amazon VPC CNI `1.9.0` or later and Nitro-based
+EC2 worker nodes; I would pin and verify the supported add-on version before
+rolling nodes rather than assuming the cluster default supports it. Mixed node
+groups must be checked individually because a legacy non-Nitro instance type can
+invalidate the capacity model.
+
 Host-network Pods continue to use node addresses from the primary CIDR. Ordinary workload Pods receive addresses from the AZ-specific secondary subnet.
 
 ## Cluster 1 to Cluster 2 without the VPN
@@ -73,6 +79,15 @@ Cluster 2 has the mirror image. AWS selects the longest prefix, so Cluster 1 tra
 I would then update security groups and network ACLs in both directions for the required ports. If Cluster 1 talks directly to Cluster 2 Pod IPs and source identity must be preserved, I would exempt the peer CIDRs from the VPC CNI's node SNAT using `AWS_VPC_K8S_CNI_EXCLUDE_SNAT_CIDRS`; the reverse routes above are then mandatory. This setting must be tested alongside internet egress because broad SNAT changes can break unrelated outbound traffic.
 
 Applications should use private DNS names rather than Pod IPs. For normal service consumption, Cluster 1 resolves a private name to an internal load balancer in Cluster 2. I would associate the private hosted zone with both VPCs, or use Route 53 Resolver forwarding where corporate DNS also needs the name. Peering DNS-resolution options must be enabled if the selected name-resolution path depends on them.
+
+Each cluster's Kubernetes Service CIDR must be checked against both VPC CIDRs,
+both Pod CIDRs, corporate/on-premises routes, and any future peered or transit
+ranges before cluster creation. ClusterIP addresses are virtual and are not
+routed across the VPC peer in this design; cross-cluster consumers use the
+Cluster 2 load balancer or another explicit multi-cluster service mechanism.
+Therefore sharing a non-overlapping-with-the-network Service CIDR between the
+clusters can work, but I would allocate distinct Service CIDRs to avoid ambiguity
+and preserve the option of a future service-routing solution.
 
 VPC peering is intentionally non-transitive: neither VPC can use the other's VPN through the peer. That is acceptable because the design gives each VPC its own corporate VPN and uses peering only for direct VPC-to-VPC traffic. If the environment grew to many VPCs, I would evaluate a Transit Gateway, but two VPCs do not justify the added routing and cost by themselves.
 

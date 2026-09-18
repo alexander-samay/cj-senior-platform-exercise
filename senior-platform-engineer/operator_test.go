@@ -113,7 +113,10 @@ func testResource() *CjPod {
 			UID:       types.UID("cjpod-uid"),
 		},
 		Spec: CjPodSpec{Template: CjPodTemplate{
-			Metadata: metav1.ObjectMeta{Labels: map[string]string{"app": "demo"}},
+			Metadata: CjPodTemplateMetadata{
+				Labels:      map[string]string{"app": "demo"},
+				Annotations: map[string]string{"example.test/trace": "enabled"},
+			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{
 				Name:  "abc",
 				Image: "nginx",
@@ -174,8 +177,23 @@ func TestReconcileCreatesPodFromTemplate(t *testing.T) {
 	if pod.Spec.Containers[0].Image != "nginx" || pod.Labels["app"] != "demo" {
 		t.Fatalf("Pod did not preserve template: %#v", pod)
 	}
+	if pod.Annotations["example.test/trace"] != "enabled" || len(pod.Finalizers) != 0 {
+		t.Fatalf("Pod metadata was not safely rendered: %#v", pod.ObjectMeta)
+	}
 	if !metav1.IsControlledBy(&pod, resource) {
 		t.Fatal("created Pod is missing the CjPod controller reference")
+	}
+	if len(pod.OwnerReferences) != 1 || pod.OwnerReferences[0].BlockOwnerDeletion == nil || *pod.OwnerReferences[0].BlockOwnerDeletion {
+		t.Fatalf("expected one non-blocking controller owner reference, got %#v", pod.OwnerReferences)
+	}
+	var current CjPod
+	if err := client.Get(ctx, requestFor(resource).NamespacedName, &current); err != nil {
+		t.Fatal(err)
+	}
+	ready := findCondition(current.Status.Conditions, ConditionReady)
+	completed := findCondition(current.Status.Conditions, ConditionCompleted)
+	if ready == nil || ready.Status != metav1.ConditionTrue || completed == nil || completed.Status != metav1.ConditionFalse {
+		t.Fatalf("unexpected active lifecycle conditions: %#v", current.Status.Conditions)
 	}
 }
 
@@ -243,6 +261,11 @@ func TestReconcileResumesTimerAfterRestartAndCompletes(t *testing.T) {
 	}
 	if gotResource.Status.Phase != PhaseCompleted || gotResource.Status.CompletedAt == nil {
 		t.Fatalf("expected completed status, got %#v", gotResource.Status)
+	}
+	completed := findCondition(gotResource.Status.Conditions, ConditionCompleted)
+	ready := findCondition(gotResource.Status.Conditions, ConditionReady)
+	if completed == nil || completed.Status != metav1.ConditionTrue || ready == nil || ready.Status != metav1.ConditionFalse {
+		t.Fatalf("unexpected completed lifecycle conditions: %#v", gotResource.Status.Conditions)
 	}
 }
 
@@ -343,6 +366,38 @@ func TestCompletedResourceDoesNotCreateAnotherPod(t *testing.T) {
 	err := client.Get(ctx, requestFor(resource).NamespacedName, &pod)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("completed CjPod created another Pod: %v", err)
+	}
+}
+
+func TestExternalPodDeletionTerminatesWithoutReplacement(t *testing.T) {
+	ctx := context.Background()
+	started := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	resource := testResource()
+	resource.Status = CjPodStatus{
+		Phase:     PhaseRunning,
+		PodUID:    types.UID("deleted-pod-uid"),
+		StartedAt: &metav1.Time{Time: started},
+	}
+	scheme := testScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource).Build()
+	reconciler := &CjPodReconciler{Client: baseClient, Scheme: scheme, Clock: &fakeClock{now: started.Add(time.Minute)}}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(resource)); err != nil {
+		t.Fatalf("reconcile returned error: %v", err)
+	}
+	var current CjPod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.Status.Phase != PhaseFailed {
+		t.Fatalf("expected terminal failure after external deletion, got %#v", current.Status)
+	}
+	if _, err := reconciler.Reconcile(ctx, requestFor(resource)); err != nil {
+		t.Fatalf("terminal failure reconcile returned error: %v", err)
+	}
+	var pod corev1.Pod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &pod); !apierrors.IsNotFound(err) {
+		t.Fatalf("controller replaced an externally deleted Pod: %v", err)
 	}
 }
 

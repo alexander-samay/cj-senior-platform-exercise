@@ -18,15 +18,17 @@ Pod deletion, and the final status update.
 
 ## Install on a cluster
 
-Build and publish the image, then point the Kustomize image override at it:
+Build and publish the image, resolve its registry digest, then point the
+Kustomize image override at that immutable digest:
 
 ```sh
 docker build -t REGISTRY/cjpod-controller:TAG .
 docker push REGISTRY/cjpod-controller:TAG
+docker buildx imagetools inspect REGISTRY/cjpod-controller:TAG
 cd config
-kustomize edit set image cjpod-controller=REGISTRY/cjpod-controller:TAG
+kustomize edit set image cjpod-controller=REGISTRY/cjpod-controller@sha256:DIGEST
 kubectl apply --server-side -f crd/cjpods.yaml
-kubectl wait --for=condition=Established crd/cjpods.interview.cj.dev --timeout=60s
+until [ "$(kubectl get crd cjpods.interview.cj.dev -o jsonpath='{.status.conditions[?(@.type=="Established")].status}')" = "True" ]; do sleep 1; done
 kubectl apply --server-side -k .
 kubectl apply -f sample.yaml
 ```
@@ -39,4 +41,6 @@ startup discovery race in the controller manager.
 
 The controller exposes metrics on port `8080` and liveness/readiness endpoints
 on port `8081`. Leader election is enabled in the Deployment so only one of the
-two replicas actively reconciles resources.
+two replicas actively reconciles resources. Required Pod anti-affinity means a
+production cluster needs at least two schedulable worker nodes; the replicas
+cannot silently collapse onto the same node.

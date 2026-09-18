@@ -18,10 +18,22 @@ import (
 
 var scheme = runtime.NewScheme()
 
+const leaderElectionID = "cjpod-controller.interview.cj.dev"
+
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(corev1.AddToScheme(scheme))
 	utilruntime.Must(cjpod.AddToScheme(scheme))
+}
+
+func managerOptions(metricsAddress, probeAddress string, leaderElection bool) ctrl.Options {
+	return ctrl.Options{
+		Scheme:                 scheme,
+		Metrics:                metricsserver.Options{BindAddress: metricsAddress},
+		HealthProbeBindAddress: probeAddress,
+		LeaderElection:         leaderElection,
+		LeaderElectionID:       leaderElectionID,
+	}
 }
 
 func main() {
@@ -39,13 +51,7 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&loggingOptions)))
 	setupLog := ctrl.Log.WithName("setup")
 
-	manager, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: metricsAddress},
-		HealthProbeBindAddress: probeAddress,
-		LeaderElection:         leaderElection,
-		LeaderElectionID:       "cjpod-controller.interview.cj.dev",
-	})
+	manager, err := ctrl.NewManager(ctrl.GetConfigOrDie(), managerOptions(metricsAddress, probeAddress, leaderElection))
 	if err != nil {
 		setupLog.Error(err, "unable to create manager")
 		os.Exit(1)
