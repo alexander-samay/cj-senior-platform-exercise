@@ -68,6 +68,14 @@ func TestManagerLifecycleWithAPIServer(t *testing.T) {
 	if err := apiClient.Create(ctx, invalid); !apierrors.IsInvalid(err) {
 		t.Fatalf("CRD should reject a Pod template without containers, got %v", err)
 	}
+	missingImage := testResource()
+	missingImage.Name = "invalid-empty-image"
+	missingImage.Namespace = namespace.Name
+	missingImage.UID = ""
+	missingImage.Spec.Template.Spec.Containers[0].Image = ""
+	if err := apiClient.Create(ctx, missingImage); !apierrors.IsInvalid(err) {
+		t.Fatalf("CRD should reject a container without an image, got %v", err)
+	}
 	resource := testResource()
 	resource.Namespace = namespace.Name
 	resource.UID = ""

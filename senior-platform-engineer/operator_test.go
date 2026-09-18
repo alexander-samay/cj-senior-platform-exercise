@@ -58,6 +58,20 @@ type podReadFailingClient struct {
 	err      error
 }
 
+type podCreateFailingClient struct {
+	client.Client
+	failures int
+	err      error
+}
+
+func (c *podCreateFailingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if _, isPod := obj.(*corev1.Pod); isPod && c.failures > 0 {
+		c.failures--
+		return c.err
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
 func (c *podReadFailingClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	if _, isPod := obj.(*corev1.Pod); isPod && c.failures > 0 {
 		c.failures--
@@ -531,4 +545,35 @@ func TestTerminatingPodRemainsDeletingUntilItDisappears(t *testing.T) {
 	if current.Status.Phase != PhaseDeleting {
 		t.Fatalf("controller completed before Pod disappeared: %#v", current.Status)
 	}
+}
+
+func TestPodCreationFailureIsVisibleInStatus(t *testing.T) {
+	ctx := context.Background()
+	resource := testResource()
+	scheme := testScheme(t)
+	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource).Build()
+	injectedError := errors.New("injected Pod admission failure")
+	failingClient := &podCreateFailingClient{Client: baseClient, failures: 1, err: injectedError}
+	reconciler := &CjPodReconciler{Client: failingClient, Scheme: scheme, Clock: &fakeClock{now: time.Now()}}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(resource)); !errors.Is(err, injectedError) {
+		t.Fatalf("expected injected Pod creation failure, got %v", err)
+	}
+	var diagnosed CjPod
+	if err := baseClient.Get(ctx, requestFor(resource).NamespacedName, &diagnosed); err != nil {
+		t.Fatal(err)
+	}
+	condition := findCondition(diagnosed.Status.Conditions, ConditionFailed)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "PodCreateFailed" || !strings.Contains(condition.Message, injectedError.Error()) {
+		t.Fatalf("Pod creation failure was not exposed in status: %#v", diagnosed.Status.Conditions)
+	}
+}
+
+func findCondition(conditions []metav1.Condition, conditionType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return &conditions[i]
+		}
+	}
+	return nil
 }

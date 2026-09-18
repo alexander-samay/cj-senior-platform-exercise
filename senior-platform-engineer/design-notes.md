@@ -51,7 +51,9 @@ recovery from a persisted deletion intent, deletion and completion, refusal to
 touch an unowned Pod or a different Pod UID, and one-shot behavior after
 completion. Failure-path cases prove recovery when Pod creation succeeds but
 the first status write fails, deletion fails after intent is persisted, and the
-final completion status write fails.
+final completion status write conflicts. They also cover a temporary API read
+failure, an admission failure exposed through conditions, a Pod held in
+`Terminating` by a finalizer, and a parent that disappears during reconciliation.
 
 The integration-tagged envtest starts a real Kubernetes API server, installs
 the CRD, and starts the controller manager. It verifies admission rejects an
@@ -59,11 +61,12 @@ empty Pod template and exercises create, watch delivery, a full manager restart,
 deadline recovery, deletion, and completed status. `make test-integration`
 installs the matching envtest binaries and runs this test.
 
-The CRD schema requires a Pod spec with at least one named container and a
-non-empty image, and status phases are constrained to the controller's three
-known values. The remainder of PodSpec is preserved because reproducing the
-upstream Kubernetes Pod schema manually would drift; the real API server still
-performs native Pod validation when the controller creates the Pod.
+The CRD is generated from the Go types with `controller-gen`, so the complete
+upstream `PodTemplateSpec` OpenAPI schema is present rather than a permissive
+unknown-fields escape hatch. Additional CEL validation requires non-empty
+container names and images, makes the one-shot spec immutable, and constrains
+status phases to the controller's three known values. `make generate-crd`
+reproduces the checked-in manifest.
 
 ## Runtime packaging
 
@@ -73,7 +76,6 @@ optional leader election. A non-root distroless image, ServiceAccount, RBAC,
 two-replica leader-elected Deployment, Kustomize configuration, sample resource,
 and installation instructions are included. See `INSTALL.md`.
 
-For a larger production system I would generate the CRD from Go markers instead
-of maintaining it by hand, publish domain-specific metrics for reconciliation
-failures and deletion lag, and add an end-to-end test on the oldest and newest
-supported Kubernetes versions.
+For a larger production system I would publish domain-specific metrics for
+reconciliation failures and deletion lag, and add an end-to-end test on the
+oldest and newest supported Kubernetes versions.

@@ -32,7 +32,7 @@ I used OpenAI Codex as a design and implementation assistant.
 - I rejected describing VPC peering as sufficient by itself; subnet route tables, return paths, security controls, DNS, and possible SNAT exclusions are also required.
 - I rejected merely moving the PagerDuty route above the Slack route without deciding whether critical alerts should also continue to Slack.
 - I rejected treating every transient reconciliation error as terminal; failure conditions are diagnostic and the controller continues to retry.
-- I rejected hand-copying the entire upstream Pod OpenAPI schema because it would drift from the Kubernetes version; the CRD validates the minimum usable template and the API server validates the native Pod on creation.
+- I rejected hand-copying the upstream Pod OpenAPI schema because it would drift from the Kubernetes version; `controller-gen` now derives the complete schema from the pinned Kubernetes Go types.
 
 ## Independent verification
 

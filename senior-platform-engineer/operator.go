@@ -20,16 +20,19 @@ import (
 )
 
 const (
-	PodLifetime       = 3 * time.Minute
-	PhaseRunning      = "Running"
-	PhaseDeleting     = "Deleting"
-	PhaseCompleted    = "Completed"
-	ConditionReady    = "Ready"
-	ConditionFailed   = "Failed"
-	deletionPollDelay = time.Second
+	PodLifetime                  = 3 * time.Minute
+	PhaseRunning      CjPodPhase = "Running"
+	PhaseDeleting     CjPodPhase = "Deleting"
+	PhaseCompleted    CjPodPhase = "Completed"
+	ConditionReady               = "Ready"
+	ConditionFailed              = "Failed"
+	deletionPollDelay            = time.Second
 )
 
 var GroupVersion = schema.GroupVersion{Group: "interview.cj.dev", Version: "v1"}
+
+// +kubebuilder:validation:Enum=Running;Deleting;Completed
+type CjPodPhase string
 
 // CjPodSpec defines the desired Pod template.
 type CjPodSpec struct {
@@ -38,7 +41,7 @@ type CjPodSpec struct {
 
 // CjPodStatus persists the lifecycle across controller restarts.
 type CjPodStatus struct {
-	Phase              string             `json:"phase,omitempty"`
+	Phase              CjPodPhase         `json:"phase,omitempty"`
 	PodUID             types.UID          `json:"podUID,omitempty"`
 	StartedAt          *metav1.Time       `json:"startedAt,omitempty"`
 	CompletedAt        *metav1.Time       `json:"completedAt,omitempty"`
@@ -46,6 +49,11 @@ type CjPodStatus struct {
 	Conditions         []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// +kubebuilder:resource:path=cjpods,scope=Namespaced
+// +kubebuilder:validation:XValidation:rule="self.spec == oldSelf.spec",message="spec is immutable; create a new CjPod for another run"
+// +kubebuilder:validation:XValidation:rule="self.spec.template.spec.containers.all(c, c.name.size() > 0 && has(c.image) && c.image.size() > 0)",message="every container must have a non-empty name and image"
 type CjPod struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -54,6 +62,7 @@ type CjPod struct {
 	Status CjPodStatus `json:"status,omitempty"`
 }
 
+// +kubebuilder:object:root=true
 type CjPodList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
