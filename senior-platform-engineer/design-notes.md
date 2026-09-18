@@ -39,12 +39,26 @@ name for another run.
 
 The reconciler returns `RequeueAfter` for the remaining lifetime. Every reconcile recalculates the deadline from persisted API state, so operator restarts do not reset the clock and cannot cause an early controller-initiated deletion.
 
+The minimum lifetime applies to the **Pod API object**, not to successful
+application execution. An arbitrary container can exit, crash, fail admission,
+or become terminal before three minutes, and no generic controller can guarantee
+that untrusted workload code keeps running. The controller deliberately retains
+the Pod object until its deadline so its terminal status and logs remain
+observable. If the product requirement were instead three minutes of healthy
+container runtime, this API would need a narrower workload contract plus
+readiness/runtime accounting; accepting an arbitrary `PodSpec` would be the
+wrong interface.
+
 In a distributed system, "exactly three minutes" means **not before three minutes, then as soon as the controller is scheduled after the deadline**. API latency, controller work queues, and control-plane outages can make deletion later than the deadline. A strict wall-clock guarantee is not possible for an ordinary Kubernetes controller.
 
 ## Recovery and ownership
 
 - The controller watches CjPods and owned Pods, so Pod changes enqueue the parent resource.
-- A missing CjPod is ignored. Kubernetes garbage collection handles an owned Pod if the CjPod itself is deleted.
+- A missing CjPod is ignored. Deleting the parent is an explicit cancellation
+  operation: Kubernetes garbage collection may remove the child before its
+  normal three-minute deadline. Protecting against intentional parent deletion
+  would require a CjPod finalizer and would make deletion block until the
+  deadline; that is not the lifecycle contract chosen here.
 - An unowned same-name Pod is a collision, not something the controller may delete or overwrite.
 - A stored Pod UID mismatch is treated as a safety error.
 - Only labels and annotations are copied from template metadata. User-supplied
@@ -64,11 +78,17 @@ the first status write fails, deletion fails after intent is persisted, and the
 final completion status write conflicts. They also cover a temporary API read
 failure, an admission failure exposed through conditions, a Pod held in
 `Terminating` by a finalizer, and a parent that disappears during reconciliation.
+The terminating-Pod case also proves the controller issues only one delete
+request instead of producing duplicate API calls and Events on every poll.
 
 The integration-tagged envtest starts a real Kubernetes API server, installs
 the CRD, and starts the controller manager. It verifies admission rejects an
 empty Pod template and exercises create, watch delivery, a full manager restart,
-deadline recovery, deletion, and completed status. `make test-integration`
+deadline recovery, deletion, and completed status. The restart test records the
+original UID, creation timestamp, and deadline; it asserts the Pod is not
+terminating before manager one stops, starts manager two before the deadline,
+and verifies the same Pod immediately before that original deadline.
+`make test-integration`
 installs the matching envtest binaries and runs this test. A second lifecycle
 case deletes the child externally and verifies terminal `Failed` status with no
 replacement Pod.

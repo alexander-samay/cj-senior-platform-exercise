@@ -1,0 +1,40 @@
+name: Senior Platform CI
+
+on:
+  pull_request:
+    paths:
+      - senior-platform-engineer/**
+      - .github/workflows/senior-platform-ci.yaml
+  push:
+    branches: [main]
+    paths:
+      - senior-platform-engineer/**
+      - .github/workflows/senior-platform-ci.yaml
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: senior-platform-engineer
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: senior-platform-engineer/go.mod
+          cache-dependency-path: senior-platform-engineer/go.sum
+
+      - name: Verify generated files, formatting, tests, race safety, and build
+        run: make verify
+
+      - name: Run API-server integration tests
+        run: make test-integration
+
+      - name: Build the controller image
+        run: docker build --tag cjpod-controller:ci .

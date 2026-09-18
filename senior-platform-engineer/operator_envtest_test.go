@@ -43,7 +43,8 @@ func TestManagerLifecycleWithAPIServer(t *testing.T) {
 	if err := AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	manager := newTestManager(t, restConfig, scheme, 2*time.Second)
+	lifetime := 10 * time.Second
+	manager := newTestManager(t, restConfig, scheme, lifetime)
 	managerContext, stopManager := context.WithCancel(context.Background())
 	managerErrors := make(chan error, 1)
 	go func() { managerErrors <- manager.Start(managerContext) }()
@@ -98,6 +99,19 @@ func TestManagerLifecycleWithAPIServer(t *testing.T) {
 		completed := findCondition(current.Status.Conditions, ConditionCompleted)
 		return ready != nil && ready.Status == metav1.ConditionTrue && completed != nil && completed.Status == metav1.ConditionFalse
 	}, "controller did not create the owned Pod")
+	var originalPod corev1.Pod
+	if err := apiClient.Get(ctx, key, &originalPod); err != nil {
+		t.Fatal(err)
+	}
+	if originalPod.DeletionTimestamp != nil || originalPod.CreationTimestamp.IsZero() {
+		t.Fatalf("Pod was already terminating or had no API-server timestamp: %#v", originalPod.ObjectMeta)
+	}
+	originalUID := originalPod.UID
+	originalCreatedAt := originalPod.CreationTimestamp.Time
+	deadline := originalCreatedAt.Add(lifetime)
+	if remaining := time.Until(deadline); remaining < 6*time.Second {
+		t.Fatalf("test setup consumed too much of the lifetime (%s remains); refusing a false-positive restart test", remaining)
+	}
 
 	// Stop the whole manager, not just a reconciler call, then start a fresh
 	// manager against the same API server. The persisted Pod timestamp remains
@@ -111,13 +125,36 @@ func TestManagerLifecycleWithAPIServer(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("first manager did not stop")
 	}
-	restartedManager := newTestManager(t, restConfig, scheme, 2*time.Second)
+	restartedManager := newTestManager(t, restConfig, scheme, lifetime)
 	restartedContext, stopRestartedManager := context.WithCancel(context.Background())
 	t.Cleanup(stopRestartedManager)
 	restartedErrors := make(chan error, 1)
 	go func() { restartedErrors <- restartedManager.Start(restartedContext) }()
 	if !restartedManager.GetCache().WaitForCacheSync(restartedContext) {
 		t.Fatal("restarted manager cache did not synchronize")
+	}
+	if !time.Now().Before(deadline) {
+		t.Fatal("restarted manager did not start before the original Pod deadline")
+	}
+	var podAfterRestart corev1.Pod
+	if err := apiClient.Get(ctx, key, &podAfterRestart); err != nil {
+		t.Fatalf("same Pod did not survive manager restart: %v", err)
+	}
+	if podAfterRestart.UID != originalUID || !podAfterRestart.CreationTimestamp.Time.Equal(originalCreatedAt) || podAfterRestart.DeletionTimestamp != nil {
+		t.Fatalf("manager restart replaced or began deleting the Pod: %#v", podAfterRestart.ObjectMeta)
+	}
+
+	// Check immediately before the original deadline. This proves manager two
+	// preserves the first Pod and its timer instead of starting a new lifecycle.
+	if wait := time.Until(deadline.Add(-500 * time.Millisecond)); wait > 0 {
+		time.Sleep(wait)
+	}
+	var podBeforeDeadline corev1.Pod
+	if err := apiClient.Get(ctx, key, &podBeforeDeadline); err != nil {
+		t.Fatalf("Pod disappeared before its original deadline: %v", err)
+	}
+	if podBeforeDeadline.UID != originalUID || podBeforeDeadline.DeletionTimestamp != nil {
+		t.Fatalf("Pod changed or began terminating before its original deadline: %#v", podBeforeDeadline.ObjectMeta)
 	}
 
 	eventually(t, 10*time.Second, func() bool {

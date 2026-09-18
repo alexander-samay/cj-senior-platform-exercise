@@ -14,7 +14,10 @@ make test-integration
 `test-integration` downloads matching `envtest` control-plane binaries and runs
 the full lifecycle against a real API server. It verifies CRD admission,
 manager startup and watches, Pod creation, manager restart, deadline recovery,
-Pod deletion, and the final status update.
+Pod deletion, and the final status update. The Kubernetes control-plane version
+is pinned in the Makefile for reproducibility. `make verify` is read-only: it
+fails on stale generated CRDs, unformatted Go, or any resulting Git diff instead
+of silently rewriting the repository.
 
 ## Install on a cluster
 

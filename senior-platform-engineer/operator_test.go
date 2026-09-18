@@ -50,6 +50,7 @@ type deleteFailingClient struct {
 	client.Client
 	failures int
 	err      error
+	calls    int
 }
 
 type podReadFailingClient struct {
@@ -81,6 +82,7 @@ func (c *podReadFailingClient) Get(ctx context.Context, key client.ObjectKey, ob
 }
 
 func (c *deleteFailingClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	c.calls++
 	if c.failures > 0 {
 		c.failures--
 		return c.err
@@ -577,7 +579,8 @@ func TestTerminatingPodRemainsDeletingUntilItDisappears(t *testing.T) {
 	}
 	scheme := testScheme(t)
 	baseClient := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&CjPod{}).WithObjects(resource, pod).Build()
-	reconciler := &CjPodReconciler{Client: baseClient, Scheme: scheme, Clock: &fakeClock{now: started.Add(PodLifetime + time.Minute)}}
+	countingClient := &deleteFailingClient{Client: baseClient}
+	reconciler := &CjPodReconciler{Client: countingClient, Scheme: scheme, Clock: &fakeClock{now: started.Add(PodLifetime + time.Minute)}}
 
 	result, err := reconciler.Reconcile(ctx, requestFor(resource))
 	if err != nil {
@@ -599,6 +602,13 @@ func TestTerminatingPodRemainsDeletingUntilItDisappears(t *testing.T) {
 	}
 	if current.Status.Phase != PhaseDeleting {
 		t.Fatalf("controller completed before Pod disappeared: %#v", current.Status)
+	}
+
+	if _, err := reconciler.Reconcile(ctx, requestFor(resource)); err != nil {
+		t.Fatalf("polling terminating Pod returned error: %v", err)
+	}
+	if countingClient.calls != 1 {
+		t.Fatalf("expected exactly one Pod delete request, got %d", countingClient.calls)
 	}
 }
 

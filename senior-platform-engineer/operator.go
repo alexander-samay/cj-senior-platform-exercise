@@ -338,6 +338,11 @@ func (r *CjPodReconciler) createPod(ctx context.Context, resource *CjPod) (ctrl.
 }
 
 func (r *CjPodReconciler) deleteOwnedPod(ctx context.Context, resource *CjPod, pod *corev1.Pod) (ctrl.Result, error) {
+	// A prior delete request is still being processed. Poll for disappearance
+	// without issuing duplicate deletes or producing duplicate Events.
+	if pod.DeletionTimestamp != nil {
+		return ctrl.Result{RequeueAfter: deletionPollDelay}, nil
+	}
 	uid := pod.UID
 	err := r.Delete(ctx, pod, client.Preconditions{UID: &uid})
 	if err != nil && !apierrors.IsNotFound(err) {

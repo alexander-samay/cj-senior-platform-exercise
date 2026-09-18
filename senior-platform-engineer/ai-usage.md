@@ -28,6 +28,8 @@ I used OpenAI Codex as a design and implementation assistant.
   and `Failed` condition semantics.
 - Pin build-stage images by digest and add cross-node anti-affinity, topology
   spreading, a PodDisruptionBudget, a default NetworkPolicy, and seccomp.
+- Make deletion polling idempotent, strengthen the real-manager restart test,
+  pin envtest, make verification non-mutating, and add pull-request CI.
 
 ## Suggestions rejected or changed
 
@@ -56,3 +58,6 @@ I used OpenAI Codex as a design and implementation assistant.
   metadata was rejected, external Pod deletion did not create a replacement,
   the lifecycle completed at the 180-second boundary, and leader failover
   succeeded.
+- I defined the three-minute guarantee precisely as Pod-object lifetime and
+  documented parent deletion as explicit cancellation rather than claiming a
+  generic controller can guarantee arbitrary container execution.
