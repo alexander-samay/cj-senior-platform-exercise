@@ -35,7 +35,7 @@ route:
       group_interval: 5m
 ```
 
-The critical route must remain before the namespace route. Critical alerts page first, and `continue: true` deliberately allows a platform or monitoring alert to reach the following Slack route as well. Non-critical platform alerts still go only to `platform-slack`, and unmatched alerts retain the root fallback. If the desired policy is PagerDuty only for critical alerts, I would remove `continue` instead of assuming that duplicate Slack delivery is wanted. CI route tests protect this ordering requirement from a future YAML reorganization.
+The critical route must remain before the namespace route. Critical alerts page first, and `continue: true` deliberately allows a platform or monitoring alert to reach the following Slack route as well. Non-critical platform alerts still go only to `platform-slack`, and unmatched alerts retain the root fallback. If the desired policy is PagerDuty only for critical alerts, I would remove `continue` instead of assuming that duplicate Slack delivery is wanted. I would add `amtool config routes test` cases to CI to protect this ordering requirement from a future YAML reorganization.
 
 I would remove the blanket inhibition rule or narrow its targets to an explicit list of alerts that an upgrade is known to trigger harmlessly. I would not use `severity="critical"` as the target selector. Before shipping, I would ask the cluster-upgrade owner which exact alert names are expected, verify that the source alert always resolves, and decide whether storage, control-plane, and data-protection alerts must be exempt under all circumstances.
 

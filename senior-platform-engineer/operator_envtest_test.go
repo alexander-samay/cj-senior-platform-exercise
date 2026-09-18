@@ -5,12 +5,14 @@ package cjpod
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
@@ -76,6 +78,28 @@ func TestManagerLifecycleWithAPIServer(t *testing.T) {
 	missingImage.Spec.Template.Spec.Containers[0].Image = ""
 	if err := apiClient.Create(ctx, missingImage); !apierrors.IsInvalid(err) {
 		t.Fatalf("CRD should reject a container without an image, got %v", err)
+	}
+	unsafeMetadata := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": GroupVersion.String(),
+		"kind":       "CjPod",
+		"metadata": map[string]any{
+			"name":      "invalid-unsafe-metadata",
+			"namespace": namespace.Name,
+		},
+		"spec": map[string]any{
+			"template": map[string]any{
+				"metadata": map[string]any{
+					"finalizers": []any{"attacker.example/hold"},
+				},
+				"spec": map[string]any{
+					"containers": []any{map[string]any{"name": "web", "image": "nginx"}},
+				},
+			},
+		},
+	}}
+	strictClient := client.WithFieldValidation(apiClient, client.FieldValidation("Strict"))
+	if err := strictClient.Create(ctx, unsafeMetadata); err == nil || !strings.Contains(err.Error(), "finalizers") {
+		t.Fatalf("strict CRD admission should reject unsafe template metadata, got %v", err)
 	}
 	resource := testResource()
 	resource.Namespace = namespace.Name
